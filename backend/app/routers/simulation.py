@@ -5,11 +5,15 @@ from app.algorithms.reconstruction import (
     run_multifrequency_simulation
 )
 from app.algorithms.timeseries_monitor import simulate_temporal_edema_progression
+from app.algorithms.electrode_optimizer import recommend_electrode_layout, evaluate_layout_quality
+from app.algorithms.dicom_export import export_simulation_to_dicom, export_multifreq_to_dicom
+from app.algorithms.image_quality import compute_all_metrics, quality_score
 from app.services.image_utils import matrix_to_base64, drawn_mask_to_edema_regions
 from app.services.task_service import TaskRepository
 from datetime import datetime
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
+import numpy as np
 
 router = APIRouter(prefix="/api/simulation", tags=["仿真"])
 
@@ -27,6 +31,20 @@ class TimeseriesRequest(BaseModel):
     num_scans: int = 10
     interval_seconds: int = 30
     expansion_rate: float = 0.08
+
+
+class ElectrodeOptimizationRequest(BaseModel):
+    grid_size: int = 16
+    num_pairs_to_select: int = 8
+    true_conductivity: Optional[List[List[float]]] = None
+    reconstructed_conductivity: Optional[List[List[float]]] = None
+
+
+class DicomExportRequest(BaseModel):
+    simulation_result: Dict[str, Any]
+    export_type: str = "reconstructed"
+    frequency: Optional[str] = None
+    patient_info: Optional[Dict[str, str]] = None
 
 
 @router.post("/2d")
@@ -170,6 +188,93 @@ async def simulate_timeseries(request: TimeseriesRequest):
             "prediction": result["prediction"],
             "warnings": result["warnings"]
         }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/electrode_optimization")
+async def optimize_electrodes(request: ElectrodeOptimizationRequest):
+    try:
+        previous_metrics = None
+        quality_evaluation = None
+        if request.true_conductivity and request.reconstructed_conductivity:
+            true_m = np.array(request.true_conductivity, dtype=np.float64)
+            rec_m = np.array(request.reconstructed_conductivity, dtype=np.float64)
+            q_eval = evaluate_layout_quality(true_m, rec_m)
+            quality_evaluation = q_eval
+            previous_metrics = q_eval["metrics"]
+        result = recommend_electrode_layout(
+            grid_size=request.grid_size,
+            num_pairs_to_select=request.num_pairs_to_select,
+            previous_metrics=previous_metrics
+        )
+        if quality_evaluation:
+            result["current_quality"] = quality_evaluation
+        result["recommendation"] = (
+            f"建议选择 {result['num_selected_pairs']} 对激励-测量电极 "
+            f"(覆盖 {result['num_unique_electrodes']} 个独立电极), "
+            f"预期质量提升: {result.get('improvement_potential', 0):.3f}"
+        )
+        task_data = {
+            "task_type": "ElectrodeOpt",
+            "status": "completed",
+            "parameters": {
+                "grid_size": request.grid_size,
+                "num_pairs_to_select": request.num_pairs_to_select
+            },
+            "reconstruction_data": result,
+            "clinical_notes": [],
+            "created_at": datetime.now(),
+            "completed_at": datetime.now()
+        }
+        task_id = await TaskRepository.create_task(task_data)
+        result["task_id"] = task_id
+        return result
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/evaluate_quality")
+async def evaluate_image_quality(
+    true_conductivity: List[List[float]],
+    reconstructed_conductivity: List[List[float]]
+):
+    try:
+        true_m = np.array(true_conductivity, dtype=np.float64)
+        rec_m = np.array(reconstructed_conductivity, dtype=np.float64)
+        return evaluate_layout_quality(true_m, rec_m)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/export_dicom")
+async def export_to_dicom(request: DicomExportRequest):
+    try:
+        sim_result = dict(request.simulation_result)
+        if request.patient_info:
+            sim_result["patient_info"] = request.patient_info
+        if request.export_type == "multifreq_all":
+            exports = export_multifreq_to_dicom(sim_result)
+            return {
+                "status": "success",
+                "num_files": len(exports),
+                "files": exports
+            }
+        else:
+            export = export_simulation_to_dicom(
+                sim_result,
+                export_type=request.export_type,
+                frequency=request.frequency
+            )
+            return {
+                "status": "success",
+                "num_files": 1,
+                "files": [export]
+            }
     except Exception as e:
         import traceback
         traceback.print_exc()

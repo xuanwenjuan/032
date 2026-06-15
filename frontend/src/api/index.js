@@ -12,7 +12,11 @@ export const simulationApi = {
   simulateMultifrequency: (data) => api.post('/simulation/multifrequency', data),
   simulateTimeseries: (data) => api.post('/simulation/timeseries', data),
   simulate3D: (data) => api.post('/simulation/3d', data),
-  get3DStatus: (taskId) => api.get(`/simulation/3d/${taskId}/status`)
+  get3DStatus: (taskId) => api.get(`/simulation/3d/${taskId}/status`),
+  optimizeElectrodes: (data) => api.post('/simulation/electrode_optimization', data),
+  evaluateQuality: (trueMat, recMat) => api.post('/simulation/evaluate_quality',
+    { true_conductivity: trueMat, reconstructed_conductivity: recMat }),
+  exportDicom: (data) => api.post('/simulation/export_dicom', data)
 }
 
 export const taskApi = {

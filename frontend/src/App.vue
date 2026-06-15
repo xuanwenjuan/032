@@ -3,7 +3,7 @@
     <header class="app-header">
       <div>
         <h1>🧠 MIT脑水肿监测系统 (增强版)</h1>
-        <div class="subtitle">多频激励 · 时间序列监测 · 扩展速度预测</div>
+        <div class="subtitle">多频激励 · 时间序列监测 · 电极优化 · DICOM导出</div>
       </div>
       <div style="display:flex;gap:10px;align-items:center">
         <el-tag type="success" effect="dark" v-if="backendStatus">后端已连接</el-tag>
@@ -101,6 +101,71 @@
               </div>
             </div>
           </div>
+
+          <div v-else-if="simMode === 'electrodeopt'" class="electrode-opt-container">
+            <div class="eo-summary" v-if="electrodeOptResult">
+              <div class="eo-title">🎯 电极布局优化结果</div>
+              <div class="eo-desc">{{ electrodeOptResult.recommendation }}</div>
+              <div class="eo-metrics-row">
+                <div class="eo-metric-card">
+                  <div class="eo-metric-label">适应度分数</div>
+                  <div class="eo-metric-val">{{ (electrodeOptResult.fitness_score * 100).toFixed(1) }}%</div>
+                </div>
+                <div class="eo-metric-card">
+                  <div class="eo-metric-label">覆盖度</div>
+                  <div class="eo-metric-val">{{ (electrodeOptResult.coverage_score * 100).toFixed(1) }}%</div>
+                </div>
+                <div class="eo-metric-card">
+                  <div class="eo-metric-label">角度分散</div>
+                  <div class="eo-metric-val">{{ (electrodeOptResult.spread_score * 100).toFixed(1) }}%</div>
+                </div>
+                <div class="eo-metric-card">
+                  <div class="eo-metric-label">使用均衡</div>
+                  <div class="eo-metric-val">{{ (electrodeOptResult.balance_score * 100).toFixed(1) }}%</div>
+                </div>
+              </div>
+              <div v-if="electrodeOptResult.current_quality" class="eo-quality-card">
+                <div class="eo-metric-label" style="margin-bottom:6px">📊 当前重建质量评估</div>
+                <div class="eo-quality-grid">
+                  <div>MSE: {{ electrodeOptResult.current_quality.metrics.mse.toFixed(5) }}</div>
+                  <div>RMSE: {{ electrodeOptResult.current_quality.metrics.rmse.toFixed(5) }}</div>
+                  <div>SSIM: {{ electrodeOptResult.current_quality.metrics.ssim.toFixed(4) }}</div>
+                  <div>PSNR: {{ electrodeOptResult.current_quality.metrics.psnr.toFixed(2) }}dB</div>
+                  <div>MAE: {{ electrodeOptResult.current_quality.metrics.mae.toFixed(5) }}</div>
+                  <div>Corr: {{ electrodeOptResult.current_quality.metrics.correlation.toFixed(4) }}</div>
+                </div>
+                <div style="margin-top:8px">
+                  <el-tag type="primary">综合质量分数: {{ (electrodeOptResult.current_quality.overall_quality_score * 100).toFixed(1) }}%</el-tag>
+                </div>
+              </div>
+            </div>
+            <v-chart class="chart" :option="electrodeLayoutOption" autoresize />
+            <div v-if="electrodeOptResult" style="padding:0 10px 10px">
+              <div style="font-size:12px;color:#94a3b8;margin-bottom:6px">
+                推荐电极对 ({{ electrodeOptResult.num_selected_pairs }}对):
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:4px">
+                <el-tag
+                  v-for="(p, idx) in electrodeOptResult.selected_pairs"
+                  :key="idx"
+                  type="warning"
+                  size="small"
+                  effect="dark">
+                  E{{ p[0] }} ↔ E{{ p[1] }}
+                </el-tag>
+              </div>
+            </div>
+          </div>
+
+          <div class="dicom-export-bar" v-if="hasReconstructionData">
+            <span style="font-size:12px;color:#94a3b8;margin-right:8px">📦 导出:</span>
+            <button class="btn btn-secondary btn-sm" @click="exportDicom('reconstructed')">DICOM 重建图</button>
+            <button class="btn btn-secondary btn-sm" v-if="simMode==='multifreq' || multiReconstructions['1kHz']"
+              @click="exportDicom('multifreq_all')">DICOM 三频+融合</button>
+            <button class="btn btn-secondary btn-sm" @click="exportDicom('fused')" v-if="fusedReconstruction.length">
+              DICOM 融合图
+            </button>
+          </div>
         </section>
       </div>
 
@@ -111,6 +176,7 @@
             <el-radio-button value="2d">标准2D</el-radio-button>
             <el-radio-button value="multifreq">多频激励</el-radio-button>
             <el-radio-button value="timeseries">时间序列监测</el-radio-button>
+            <el-radio-button value="electrodeopt">电极优化</el-radio-button>
             <el-radio-button value="3d">3D高精度</el-radio-button>
           </el-radio-group>
         </div>
@@ -123,6 +189,15 @@
             <span class="param-text">间隔:</span>
             <el-input-number v-model="intervalSec" size="small" :min="10" :max="120" style="width:100px" />
             <span class="param-text">秒</span>
+          </div>
+        </div>
+
+        <div class="toolbar-group" v-if="simMode === 'electrodeopt'">
+          <label class="input-label">电极优化参数</label>
+          <div class="param-row">
+            <span class="param-text">选择对数:</span>
+            <el-input-number v-model="numElectrodePairs" size="small" :min="4" :max="16" style="width:90px" />
+            <span class="param-text">对</span>
           </div>
         </div>
 
@@ -236,6 +311,7 @@ const brushSize = ref(2)
 const simMode = ref('multifreq')
 const numScans = ref(10)
 const intervalSec = ref(30)
+const numElectrodePairs = ref(8)
 const simulationRunning = ref(false)
 const showTaskList = ref(false)
 const tasks = ref([])
@@ -260,12 +336,15 @@ const tsData = reactive({
 const predictionData = ref(null)
 const warnings = ref([])
 const currentScanIdx = ref(0)
+const electrodeOptResult = ref(null)
+const trueConductivityRef = ref([])
 
 const modeText = computed(() => {
   const map = {
     '2d': '标准2D模式',
     'multifreq': '多频激励模式',
     'timeseries': '时间序列监测模式',
+    'electrodeopt': '电极优化模式',
     '3d': '3D高精度模式'
   }
   return map[simMode.value] || ''
@@ -275,6 +354,7 @@ const resultPanelTitle = computed(() => {
   if (simMode.value === '2d') return '📊 电导率分布重建 (单频)'
   if (simMode.value === 'multifreq') return '📊 多频电导率重建 + 融合视图'
   if (simMode.value === 'timeseries') return '📊 时间序列监测 · 动态变化'
+  if (simMode.value === 'electrodeopt') return '⚙️ 电极布局优化助手'
   return '📊 重建结果'
 })
 
@@ -282,7 +362,18 @@ const runningText = computed(() => {
   if (simMode.value === 'timeseries') {
     return `扫描中 ${currentScanIdx.value}/${numScans.value}...`
   }
+  if (simMode.value === 'electrodeopt') {
+    return '遗传算法优化中...'
+  }
   return '仿真中...'
+})
+
+const hasReconstructionData = computed(() => {
+  return (
+    (singleRecon.value && singleRecon.value.length > 0) ||
+    (multiReconstructions.value && Object.keys(multiReconstructions.value).length > 0) ||
+    (fusedReconstruction.value && fusedReconstruction.value.length > 0)
+  )
 })
 
 const severityText = computed(() => {
@@ -329,6 +420,85 @@ const fusedChartOption = computed(() =>
   genHeatmapOption(fusedReconstruction.value, '', true,
     ['#16213e', '#1a1a2e', '#533483', '#e94560', '#ff6b6b', '#ffd56b'])
 )
+
+const electrodeLayoutOption = computed(() => {
+  const N = 16
+  const center = N / 2
+  const radius = N / 2 - 0.5
+  const allElectrodes = []
+  for (let i = 0; i < 16; i++) {
+    const angle = 2 * Math.PI * i / 16
+    allElectrodes.push({
+      idx: i,
+      x: center + radius * Math.cos(angle),
+      y: center + radius * Math.sin(angle)
+    })
+  }
+  const selectedSet = new Set()
+  const selectedPairs = electrodeOptResult.value ? electrodeOptResult.value.selected_pairs || [] : []
+  selectedPairs.forEach(([a, b]) => {
+    selectedSet.add(a)
+    selectedSet.add(b)
+  })
+  const series = []
+  if (selectedPairs.length > 0) {
+    series.push({
+      type: 'lines',
+      coordinateSystem: 'cartesian2d',
+      polyline: false,
+      effect: { show: true, period: 4, trailLength: 0.2, symbol: 'arrow', symbolSize: 6 },
+      lineStyle: { color: '#fbbf24', width: 3, opacity: 0.8, curveness: 0.15 },
+      data: selectedPairs.map(([a, b]) => [
+        [allElectrodes[a].x, allElectrodes[a].y],
+        [allElectrodes[b].x, allElectrodes[b].y]
+      ])
+    })
+  }
+  const brainData = []
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < N; j++) {
+      const cx = N / 2, cy = N / 2, r = N / 2 - 0.5
+      const dist = Math.sqrt((i - cx + 0.5) ** 2 + (j - cy + 0.5) ** 2)
+      if (dist <= r) brainData.push([j, i, 0.05])
+    }
+  }
+  series.push({
+    type: 'heatmap',
+    data: brainData,
+    itemStyle: { color: '#1e293b' },
+    emphasis: { disabled: true }
+  })
+  series.push({
+    type: 'scatter',
+    symbolSize: 28,
+    data: allElectrodes.map(e => ({
+      value: [e.x, e.y],
+      name: 'E' + e.idx,
+      itemStyle: {
+        color: selectedSet.has(e.idx) ? '#f59e0b' : '#475569',
+        borderColor: selectedSet.has(e.idx) ? '#fbbf24' : '#334155',
+        borderWidth: 2
+      },
+      label: { show: true, color: '#fff', fontSize: 10, fontWeight: 'bold', formatter: 'E' + e.idx }
+    })),
+    label: { show: true, position: 'inside', color: '#fff', fontSize: 10, fontWeight: 'bold' },
+    zlevel: 10
+  })
+  return {
+    tooltip: {
+      trigger: 'item',
+      formatter: p => {
+        if (p.seriesType === 'scatter') return p.data.name + ': ' + (selectedSet.has(parseInt(p.data.name.slice(1))) ? '✅ 已选用' : '未选用')
+        if (p.seriesType === 'lines') return '激励-测量对'
+        return ''
+      }
+    },
+    grid: { left: '4%', right: '4%', top: '12%', bottom: '4%' },
+    xAxis: { type: 'value', min: -0.5, max: N - 0.5, show: false },
+    yAxis: { type: 'value', min: -0.5, max: N - 0.5, show: false, inverse: false },
+    series
+  }
+})
 
 function getFreqChartOption(freq) {
   const data = multiReconstructions.value[freq] || []
@@ -474,6 +644,8 @@ function clearCanvas() {
   tsData.perFreqSigma = {}
   predictionData.value = null
   warnings.value = []
+  electrodeOptResult.value = null
+  trueConductivityRef.value = []
 }
 
 async function runSimulation() {
@@ -519,12 +691,73 @@ async function runSimulation() {
           duration: 5000
         })
       }
+    } else if (simMode.value === 'electrodeopt') {
+      let trueMat = null
+      let recMat = null
+      if (singleRecon.value.length) {
+        recMat = singleRecon.value
+      } else if (fusedReconstruction.value.length) {
+        recMat = fusedReconstruction.value
+      }
+      const resp = await simulationApi.optimizeElectrodes({
+        grid_size: GRID_SIZE,
+        num_pairs_to_select: numElectrodePairs.value,
+        true_conductivity: trueMat,
+        reconstructed_conductivity: recMat
+      })
+      electrodeOptResult.value = resp.data
+      ElMessage.success('电极布局优化完成! 适应度:' + (resp.data.fitness_score * 100).toFixed(1) + '%')
     }
     await loadTasks()
   } catch (err) {
     ElMessage.error('仿真失败: ' + (err.response?.data?.detail || err.message))
   } finally {
     simulationRunning.value = false
+  }
+}
+
+function base64ToBlob(b64, contentType = 'application/octet-stream') {
+  const byteChars = atob(b64)
+  const bytes = new Uint8Array(byteChars.length)
+  for (let i = 0; i < byteChars.length; i++) bytes[i] = byteChars.charCodeAt(i)
+  return new Blob([bytes], { type: contentType })
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  setTimeout(() => URL.revokeObjectURL(url), 100)
+}
+
+async function exportDicom(exportType, frequency = null) {
+  try {
+    const simResult = {
+      task_id: 'MIT-' + Date.now().toString(36),
+      reconstructed_conductivity: singleRecon.value,
+      true_conductivity: trueConductivityRef.value,
+      fused_reconstruction: fusedReconstruction.value,
+      reconstructions: multiReconstructions.value,
+      cole_cole_params: coleColeParams.value
+    }
+    const resp = await simulationApi.exportDicom({
+      simulation_result: simResult,
+      export_type: exportType,
+      frequency
+    })
+    if (resp.data.status === 'success') {
+      resp.data.files.forEach(f => {
+        const blob = base64ToBlob(f.dicom_bytes_base64, f.content_type)
+        downloadBlob(blob, f.filename)
+      })
+      ElMessage.success(`已导出 ${resp.data.num_files} 个DICOM文件`)
+    }
+  } catch (err) {
+    ElMessage.error('DICOM导出失败: ' + (err.response?.data?.detail || err.message))
   }
 }
 
@@ -554,6 +787,9 @@ function viewTask(task) {
     }
     predictionData.value = rd.prediction || null
     fusedReconstruction.value = rd.last_scan_fused || []
+  } else if (task.task_type === 'ElectrodeOpt') {
+    simMode.value = 'electrodeopt'
+    electrodeOptResult.value = rd
   } else {
     simMode.value = '2d'
     singleRecon.value = rd.reconstructed_conductivity || rd.mid_slice || []
@@ -583,7 +819,7 @@ function getStatusText(s) {
   return { completed: '已完成', running: '运行中', pending: '等待中', failed: '失败', queued: '队列中' }[s] || s
 }
 function getTaskTypeLabel(t) {
-  return { '2D': '标准2D', 'MultiFreq': '多频激励', 'TimeSeries': '时间序列', '3D': '3D仿真' }[t] || t
+  return { '2D': '标准2D', 'MultiFreq': '多频激励', 'TimeSeries': '时间序列', '3D': '3D仿真', 'ElectrodeOpt': '电极优化' }[t] || t
 }
 function formatTime(t) {
   if (!t) return ''
@@ -675,6 +911,44 @@ onMounted(() => {
   border-radius: 4px; font-size: 12px; color: #fff;
   line-height: 1.5;
 }
+
+.electrode-opt-container {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 6px;
+}
+.eo-summary {
+  background: linear-gradient(135deg, #0c1929, #1e293b);
+  border: 1px solid #fbbf24; border-radius: 8px;
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
+}
+.eo-title { font-size: 14px; font-weight: 700; color: #fbbf24; }
+.eo-desc { font-size: 12px; color: #cbd5e1; line-height: 1.5; }
+.eo-metrics-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.eo-metric-card {
+  background: rgba(0,0,0,0.3); border-radius: 6px;
+  padding: 6px; text-align: center;
+  border: 1px solid #334155;
+}
+.eo-metric-label { font-size: 10px; color: #94a3b8; margin-bottom: 3px; }
+.eo-metric-val { font-size: 14px; font-weight: 700; color: #60a5fa; }
+.eo-quality-card {
+  background: rgba(59, 130, 246, 0.08);
+  border: 1px solid #3b82f6; border-radius: 6px;
+  padding: 8px 10px;
+}
+.eo-quality-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  gap: 4px 12px;
+  font-size: 12px; color: #cbd5e1;
+}
+
+.dicom-export-bar {
+  margin-top: 8px; padding: 8px 10px;
+  background: #1e293b; border: 1px solid #334155;
+  border-radius: 8px; display: flex; gap: 8px; align-items: center;
+  flex-wrap: wrap;
+}
+.btn-sm { padding: 4px 10px; font-size: 12px; }
 
 .toolbar-v2 {
   background: #1e293b; border-radius: 12px;
