@@ -3,6 +3,42 @@ from typing import List, Tuple, Optional
 from app.core.config import settings
 
 
+class ColeColeModel:
+    def __init__(self):
+        self.sigma_0_normal = 0.12
+        self.sigma_inf_normal = 0.75
+        self.tau_normal = 1.5e-3
+        self.alpha_normal = 0.7
+
+        self.sigma_0_edema = 0.25
+        self.sigma_inf_edema = 1.80
+        self.tau_edema = 4.5e-3
+        self.alpha_edema = 0.85
+
+    def conductivity(self, frequency: float, tissue_type: str = "normal") -> float:
+        omega = 2 * np.pi * frequency
+
+        if tissue_type == "normal":
+            sigma_0 = self.sigma_0_normal
+            sigma_inf = self.sigma_inf_normal
+            tau = self.tau_normal
+            alpha = self.alpha_normal
+        else:
+            sigma_0 = self.sigma_0_edema
+            sigma_inf = self.sigma_inf_edema
+            tau = self.tau_edema
+            alpha = self.alpha_edema
+
+        denom = 1 + (1j * omega * tau) ** (1 - alpha)
+        sigma_c = sigma_0 + (sigma_inf - sigma_0) / denom
+        return np.real(sigma_c)
+
+    def edema_factor_at_freq(self, frequency: float) -> float:
+        sigma_n = self.conductivity(frequency, "normal")
+        sigma_e = self.conductivity(frequency, "edema")
+        return sigma_e / sigma_n if sigma_n > 0 else 1.0
+
+
 class ElectrodeConfig:
     def __init__(self, grid_size: int = 16, num_electrodes: int = 16):
         self.grid_size = grid_size
@@ -39,23 +75,33 @@ def create_conductivity_map(
     grid_size: int = 16,
     edema_regions: Optional[List[dict]] = None,
     base_conductivity: float = 0.5,
-    edema_conductivity_factor: float = 2.0
+    edema_conductivity_factor: float = 2.0,
+    frequency: Optional[float] = None
 ) -> np.ndarray:
     brain_mask = create_brain_mask(grid_size)
+
+    if frequency is not None:
+        cc = ColeColeModel()
+        base_sigma = cc.conductivity(frequency, "normal")
+        edema_factor = cc.edema_factor_at_freq(frequency)
+    else:
+        base_sigma = base_conductivity
+        edema_factor = edema_conductivity_factor
+
     sigma = np.zeros((grid_size, grid_size), dtype=np.float64)
-    sigma[brain_mask] = base_conductivity
+    sigma[brain_mask] = base_sigma
 
     if edema_regions:
         for region in edema_regions:
             cx = region.get('center_x', grid_size // 2)
             cy = region.get('center_y', grid_size // 2)
             radius = region.get('radius', 2)
-            factor = region.get('conductivity_factor', edema_conductivity_factor)
+            region_factor = region.get('conductivity_factor', edema_factor)
             for i in range(grid_size):
                 for j in range(grid_size):
                     dist = np.sqrt((i - cx) ** 2 + (j - cy) ** 2)
                     if dist <= radius and brain_mask[i, j]:
-                        sigma[i, j] = base_conductivity * factor
+                        sigma[i, j] = base_sigma * region_factor
     return sigma
 
 

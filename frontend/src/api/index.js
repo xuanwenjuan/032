@@ -4,13 +4,15 @@ const API_BASE = '/api'
 
 const api = axios.create({
   baseURL: API_BASE,
-  timeout: 60000
+  timeout: 180000
 })
 
 export const simulationApi = {
   simulate2D: (data) => api.post('/simulation/2d', data),
+  simulateMultifrequency: (data) => api.post('/simulation/multifrequency', data),
+  simulateTimeseries: (data) => api.post('/simulation/timeseries', data),
   simulate3D: (data) => api.post('/simulation/3d', data),
-  get3DStatus: (taskId) => api.get(`/simulation/3d/${taskId}/status')
+  get3DStatus: (taskId) => api.get(`/simulation/3d/${taskId}/status`)
 }
 
 export const taskApi = {

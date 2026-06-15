@@ -1,11 +1,19 @@
 import numpy as np
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from app.algorithms.forward_solver import (
     ForwardSolverFDM,
     create_brain_mask,
     create_conductivity_map,
-    ElectrodeConfig
+    ElectrodeConfig,
+    ColeColeModel
 )
+
+
+FREQUENCIES = {
+    "1kHz": 1e3,
+    "10kHz": 1e4,
+    "100kHz": 1e5
+}
 
 
 class LinearBackProjection:
@@ -99,6 +107,93 @@ class LinearBackProjection:
         recon_normalized[~self.brain_mask] = 0
 
         return recon_normalized
+
+
+def run_single_freq_simulation(
+    grid_size: int,
+    edema_regions: list,
+    frequency: float
+) -> Dict[str, Any]:
+    sigma = create_conductivity_map(grid_size, edema_regions, frequency=frequency)
+    solver = ForwardSolverFDM(grid_size, frequency=frequency)
+    measurements = solver.compute_measurements(sigma)
+
+    base_sigma = create_conductivity_map(grid_size, [], frequency=frequency)
+    reference_measurements = solver.compute_measurements(base_sigma)
+
+    reconstructor = LinearBackProjection(grid_size)
+    reconstruction = reconstructor.reconstruct(measurements, reference_measurements)
+
+    return {
+        "true_conductivity": sigma.tolist(),
+        "reconstructed_conductivity": reconstruction.tolist()
+    }
+
+
+def fuse_frequency_images(
+    reconstructions: Dict[str, List[List[float]]],
+    weights: Optional[Dict[str, float]] = None
+) -> List[List[float]]:
+    if weights is None:
+        weights = {"1kHz": 0.2, "10kHz": 0.5, "100kHz": 0.3}
+
+    freq_keys = list(reconstructions.keys())
+    if not freq_keys:
+        return []
+
+    N = len(reconstructions[freq_keys[0]])
+    fused = np.zeros((N, N), dtype=np.float64)
+    total_weight = 0.0
+
+    for freq_key, recon in reconstructions.items():
+        w = weights.get(freq_key, 0.0)
+        fused += np.array(recon) * w
+        total_weight += w
+
+    if total_weight > 0:
+        fused = fused / total_weight
+
+    return fused.tolist()
+
+
+def run_multifrequency_simulation(
+    grid_size: int = 16,
+    edema_regions: Optional[list] = None
+) -> Dict[str, Any]:
+    edema_regions = edema_regions or []
+
+    freq_results = {}
+    true_maps = {}
+    cc = ColeColeModel()
+
+    for freq_name, freq_val in FREQUENCIES.items():
+        result = run_single_freq_simulation(grid_size, edema_regions, freq_val)
+        freq_results[freq_name] = result["reconstructed_conductivity"]
+        true_maps[freq_name] = result["true_conductivity"]
+
+    fused = fuse_frequency_images(freq_results)
+
+    edema_sigma_values = {
+        f: cc.conductivity(v, "edema") for f, v in FREQUENCIES.items()
+    }
+    normal_sigma_values = {
+        f: cc.conductivity(v, "normal") for f, v in FREQUENCIES.items()
+    }
+
+    return {
+        "grid_size": grid_size,
+        "reconstructions": freq_results,
+        "true_conductivity_maps": true_maps,
+        "fused_reconstruction": fused,
+        "cole_cole_params": {
+            "edema_conductivity": edema_sigma_values,
+            "normal_conductivity": normal_sigma_values,
+            "edema_factor": {
+                f: edema_sigma_values[f] / normal_sigma_values[f]
+                for f in FREQUENCIES.keys()
+            }
+        }
+    }
 
 
 def run_complete_simulation_2d(
