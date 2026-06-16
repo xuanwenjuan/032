@@ -157,6 +157,67 @@
             </div>
           </div>
 
+          <div v-else-if="simMode === '3d'" class="sim-3d-container">
+            <div class="sim-3d-status">
+              <div class="status-row">
+                <span class="status-label">连接状态:</span>
+                <span :class="['ws-status-tag', wsConnected ? 'ws-connected' : 'ws-disconnected']">
+                  {{ wsConnected ? '🟢 已连接' : '🔴 已断开' }}
+                </span>
+                <span v-if="wsReconnecting" class="ws-reconnecting">🔄 重连中 ({{ wsReconnectAttempt }}/{{ maxReconnectAttempts }})</span>
+              </div>
+              <div class="status-row" v-if="simulation3d.progress > 0">
+                <span class="status-label">仿真进度:</span>
+                <div class="progress-bar">
+                  <div class="progress-fill" :style="{ width: simulation3d.progress + '%' }"></div>
+                  <span class="progress-text">{{ simulation3d.progress.toFixed(0) }}%</span>
+                </div>
+              </div>
+              <div class="status-row" v-if="simulation3d.stage">
+                <span class="status-label">当前阶段:</span>
+                <span class="stage-text">{{ simulation3d.stage }}</span>
+              </div>
+            </div>
+
+            <div class="sim-3d-results" v-if="simulation3d.mid_slice_recon">
+              <div class="sim-3d-title">🧠 3D仿真结果 (中轴切片)</div>
+              <div class="sim-3d-grid">
+                <div class="sim-3d-cell">
+                  <div class="freq-title">冠状面 (Z轴中)</div>
+                  <v-chart class="chart-sm" :option="midSliceAxialOption" autoresize />
+                </div>
+                <div class="sim-3d-cell">
+                  <div class="freq-title">矢状面 (Y轴中)</div>
+                  <v-chart class="chart-sm" :option="midSliceSagittalOption" autoresize />
+                </div>
+                <div class="sim-3d-cell">
+                  <div class="freq-title">横断面 (X轴中)</div>
+                  <v-chart class="chart-sm" :option="midSliceCoronalOption" autoresize />
+                </div>
+              </div>
+              <div class="sim-3d-stats">
+                <div class="stat-item">
+                  <div class="stat-label">体数据维度</div>
+                  <div class="stat-val">{{ simulation3d.grid_size }}×{{ simulation3d.grid_size }}×{{ simulation3d.grid_size_z || 16 }}</div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-label">体素总数</div>
+                  <div class="stat-val">{{ (simulation3d.grid_size * simulation3d.grid_size * (simulation3d.grid_size_z || 16)).toLocaleString() }}</div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-label">平均电导率</div>
+                  <div class="stat-val">{{ simulation3d.avg_conductivity ? simulation3d.avg_conductivity.toFixed(4) : '-' }} S/m</div>
+                </div>
+              </div>
+            </div>
+
+            <div v-else class="sim-3d-placeholder">
+              <div class="placeholder-icon">🧠</div>
+              <div class="placeholder-text">绘制水肿区域后点击"开始3D仿真"</div>
+              <div class="placeholder-desc">使用WebSocket实时推送进度，支持断线重连</div>
+            </div>
+          </div>
+
           <div class="dicom-export-bar" v-if="hasReconstructionData">
             <span style="font-size:12px;color:#94a3b8;margin-right:8px">📦 导出:</span>
             <button class="btn btn-secondary btn-sm" @click="exportDicom('reconstructed')">DICOM 重建图</button>
@@ -339,6 +400,27 @@ const currentScanIdx = ref(0)
 const electrodeOptResult = ref(null)
 const trueConductivityRef = ref([])
 
+const simulation3d = reactive({
+  progress: 0,
+  stage: '',
+  mid_slice_recon: null,
+  mid_slice_true: null,
+  grid_size: 32,
+  grid_size_z: 16,
+  avg_conductivity: 0,
+  result_data: null
+})
+
+const wsConnected = ref(false)
+const wsReconnecting = ref(false)
+const wsReconnectAttempt = ref(0)
+const maxReconnectAttempts = ref(5)
+let wsInstance = null
+let wsReconnectTimer = null
+let wsHeartbeatTimer = null
+let wsLastPongTime = 0
+const wsClientId = 'client_' + Math.random().toString(36).substr(2, 9)
+
 const modeText = computed(() => {
   const map = {
     '2d': '标准2D模式',
@@ -380,6 +462,41 @@ const severityText = computed(() => {
   if (!predictionData.value) return ''
   const map = { MILD: '轻度 · 可控', MODERATE: '中度 · 关注', SEVERE: '严重 · 紧急处理' }
   return map[predictionData.value.severity_level] || predictionData.value.severity_level
+})
+
+const midSliceAxialOption = computed(() => {
+  if (!simulation3d.mid_slice_recon) return genHeatmapOption([], '', true)
+  const midZ = Math.floor(simulation3d.grid_size_z / 2)
+  const slice = simulation3d.mid_slice_recon[midZ] || simulation3d.mid_slice_recon[0]
+  return genHeatmapOption(slice, '', true)
+})
+
+const midSliceSagittalOption = computed(() => {
+  if (!simulation3d.mid_slice_recon) return genHeatmapOption([], '', true)
+  const midY = Math.floor(simulation3d.grid_size / 2)
+  const slice = []
+  for (let z = 0; z < simulation3d.grid_size_z; z++) {
+    const row = []
+    for (let x = 0; x < simulation3d.grid_size; x++) {
+      row.push(simulation3d.mid_slice_recon[z]?.[midY]?.[x] || 0)
+    }
+    slice.push(row)
+  }
+  return genHeatmapOption(slice, '', true)
+})
+
+const midSliceCoronalOption = computed(() => {
+  if (!simulation3d.mid_slice_recon) return genHeatmapOption([], '', true)
+  const midX = Math.floor(simulation3d.grid_size / 2)
+  const slice = []
+  for (let z = 0; z < simulation3d.grid_size_z; z++) {
+    const row = []
+    for (let y = 0; y < simulation3d.grid_size; y++) {
+      row.push(simulation3d.mid_slice_recon[z]?.[y]?.[midX] || 0)
+    }
+    slice.push(row)
+  }
+  return genHeatmapOption(slice, '', true)
 })
 
 function genHeatmapOption(dataArr, title, showVM = true, colorPal = null) {
@@ -646,12 +763,186 @@ function clearCanvas() {
   warnings.value = []
   electrodeOptResult.value = null
   trueConductivityRef.value = []
+  simulation3d.progress = 0
+  simulation3d.stage = ''
+  simulation3d.mid_slice_recon = null
+  simulation3d.result_data = null
+}
+
+function wsConnect() {
+  if (wsInstance && wsInstance.readyState === WebSocket.OPEN) return
+
+  const wsUrl = `ws://localhost:8001/ws/3d-simulation?client_id=${wsClientId}`
+  wsInstance = new WebSocket(wsUrl)
+
+  wsInstance.onopen = () => {
+    console.log('[WS] 连接建立')
+    wsConnected.value = true
+    wsReconnecting.value = false
+    wsReconnectAttempt.value = 0
+    wsLastPongTime = Date.now()
+    wsStartHeartbeat()
+  }
+
+  wsInstance.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data)
+      wsHandleMessage(msg)
+    } catch (e) {
+      console.error('[WS] 消息解析失败:', e)
+    }
+  }
+
+  wsInstance.onclose = (event) => {
+    console.log('[WS] 连接关闭:', event.code, event.reason)
+    wsConnected.value = false
+    wsStopHeartbeat()
+    if (!wsReconnecting.value && wsReconnectAttempt.value < maxReconnectAttempts.value) {
+      wsScheduleReconnect()
+    }
+  }
+
+  wsInstance.onerror = (error) => {
+    console.error('[WS] 连接错误:', error)
+  }
+}
+
+function wsStartHeartbeat() {
+  wsStopHeartbeat()
+  wsHeartbeatTimer = setInterval(() => {
+    if (wsInstance && wsInstance.readyState === WebSocket.OPEN) {
+      wsInstance.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }))
+    }
+    const elapsed = Date.now() - wsLastPongTime
+    if (elapsed > 45000) {
+      console.warn('[WS] 心跳超时，断开重连')
+      wsInstance?.close()
+    }
+  }, 15000)
+}
+
+function wsStopHeartbeat() {
+  if (wsHeartbeatTimer) {
+    clearInterval(wsHeartbeatTimer)
+    wsHeartbeatTimer = null
+  }
+}
+
+function wsScheduleReconnect() {
+  wsReconnecting.value = true
+  wsReconnectAttempt.value++
+  const delay = Math.min(1000 * Math.pow(2, wsReconnectAttempt.value - 1), 30000)
+  console.log(`[WS] ${delay / 1000}秒后第${wsReconnectAttempt.value}次重连...`)
+  wsReconnectTimer = setTimeout(() => {
+    wsConnect()
+  }, delay)
+}
+
+function wsHandleMessage(msg) {
+  switch (msg.type) {
+    case 'pong':
+      wsLastPongTime = Date.now()
+      break
+    case 'progress':
+      simulation3d.progress = msg.progress || 0
+      simulation3d.stage = msg.stage || ''
+      break
+    case 'result':
+      simulation3d.progress = 100
+      simulation3d.stage = '完成'
+      simulation3d.mid_slice_recon = msg.mid_slice_recon
+      simulation3d.mid_slice_true = msg.mid_slice_true
+      simulation3d.grid_size = msg.grid_size || 32
+      simulation3d.grid_size_z = msg.grid_size_z || 16
+      simulation3d.avg_conductivity = msg.avg_conductivity || 0
+      simulation3d.result_data = msg
+      simulationRunning.value = false
+      ElMessage.success('3D仿真完成!')
+      break
+    case 'error':
+      simulationRunning.value = false
+      ElMessage.error('3D仿真失败: ' + (msg.message || '未知错误'))
+      break
+    case 'cache_replay':
+      if (msg.results && msg.results.length > 0) {
+        msg.results.forEach(r => {
+          if (r.type === 'progress') {
+            simulation3d.progress = r.progress || 0
+            simulation3d.stage = r.stage || ''
+          } else if (r.type === 'result') {
+            simulation3d.progress = 100
+            simulation3d.stage = '完成'
+            simulation3d.mid_slice_recon = r.mid_slice_recon
+            simulation3d.grid_size = r.grid_size || 32
+            simulation3d.grid_size_z = r.grid_size_z || 16
+            simulation3d.avg_conductivity = r.avg_conductivity || 0
+            simulation3d.result_data = r
+          }
+        })
+        if (simulation3d.progress >= 100) {
+          simulationRunning.value = false
+        }
+      }
+      break
+  }
+}
+
+function wsDisconnect() {
+  wsStopHeartbeat()
+  if (wsReconnectTimer) {
+    clearTimeout(wsReconnectTimer)
+    wsReconnectTimer = null
+  }
+  wsReconnecting.value = false
+  wsReconnectAttempt.value = 0
+  if (wsInstance) {
+    wsInstance.close()
+    wsInstance = null
+  }
+  wsConnected.value = false
+}
+
+async function start3DSimulation() {
+  try {
+    simulationRunning.value = true
+    simulation3d.progress = 0
+    simulation3d.stage = '初始化连接...'
+    simulation3d.mid_slice_recon = null
+
+    wsConnect()
+
+    const maxWait = 5000
+    const start = Date.now()
+    while (!wsConnected.value && Date.now() - start < maxWait) {
+      await new Promise(r => setTimeout(r, 100))
+    }
+
+    if (!wsConnected.value) {
+      throw new Error('WebSocket连接失败')
+    }
+
+    simulation3d.stage = '提交仿真任务...'
+    wsInstance.send(JSON.stringify({
+      type: 'start_simulation',
+      grid_size: 32,
+      grid_size_z: 16,
+      drawn_mask: drawnMask.value,
+      edema_regions: []
+    }))
+  } catch (err) {
+    simulationRunning.value = false
+    ElMessage.error('3D仿真启动失败: ' + err.message)
+  }
 }
 
 async function runSimulation() {
   simulationRunning.value = true
   currentScanIdx.value = 0
   try {
+    if (simMode.value === '3d') {
+      await start3DSimulation()
+      return
+    }
     if (simMode.value === '2d') {
       const resp = await simulationApi.simulate2D({
         grid_size: GRID_SIZE, edema_regions: [], drawn_mask: drawnMask.value
@@ -962,4 +1253,76 @@ onMounted(() => {
 .btn-row { display: flex; gap: 10px; }
 
 .chart { width: 100%; height: 100%; }
+
+.sim-3d-container {
+  display: flex; flex-direction: column; gap: 10px; padding: 4px;
+}
+.sim-3d-status {
+  background: #0f172a; border: 1px solid #334155;
+  border-radius: 8px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.status-row {
+  display: flex; align-items: center; gap: 10px;
+}
+.status-label {
+  font-size: 12px; color: #94a3b8; min-width: 80px;
+}
+.ws-status-tag {
+  font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 10px;
+}
+.ws-connected { background: rgba(16, 185, 129, 0.2); color: #10b981; }
+.ws-disconnected { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
+.ws-reconnecting {
+  font-size: 12px; color: #f59e0b;
+  animation: pulse 1.5s infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+.progress-bar {
+  flex: 1; height: 20px; background: #1e293b;
+  border-radius: 10px; position: relative; overflow: hidden;
+  border: 1px solid #334155;
+}
+.progress-fill {
+  height: 100%; background: linear-gradient(90deg, #3b82f6, #60a5fa);
+  border-radius: 10px; transition: width 0.3s ease;
+}
+.progress-text {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 11px; font-weight: 600; color: #fff;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+}
+.stage-text {
+  font-size: 12px; color: #cbd5e1; font-weight: 500;
+}
+.sim-3d-results {
+  display: flex; flex-direction: column; gap: 10px;
+}
+.sim-3d-title {
+  font-size: 14px; font-weight: 700; color: #93c5fd;
+  padding-left: 4px;
+}
+.sim-3d-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+}
+.sim-3d-cell {
+  background: #0f172a; border: 1px solid #334155;
+  border-radius: 8px; padding: 8px;
+  display: flex; flex-direction: column;
+}
+.sim-3d-stats {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+}
+.sim-3d-placeholder {
+  background: #0f172a; border: 1px dashed #475569;
+  border-radius: 8px; padding: 40px 20px;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+}
+.placeholder-icon { font-size: 48px; opacity: 0.5; }
+.placeholder-text { font-size: 14px; color: #94a3b8; }
+.placeholder-desc { font-size: 11px; color: #64748b; }
 </style>

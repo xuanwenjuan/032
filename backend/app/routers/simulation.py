@@ -85,7 +85,8 @@ async def simulate_2d(request: SimulationRequest):
             "true_conductivity": result["true_conductivity"],
             "reconstructed_image_base64": recon_image_b64,
             "true_image_base64": true_image_b64,
-            "grid_size": request.grid_size
+            "grid_size": request.grid_size,
+            "regularization": result["regularization"]
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -133,7 +134,8 @@ async def simulate_multifrequency(request: MultifrequencyRequest):
             "fused_reconstruction": result["fused_reconstruction"],
             "fused_image_base64": fused_image_b64,
             "true_conductivity_maps": result["true_conductivity_maps"],
-            "cole_cole_params": result["cole_cole_params"]
+            "cole_cole_params": result["cole_cole_params"],
+            "regularization": result["regularization"]
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -186,7 +188,8 @@ async def simulate_timeseries(request: TimeseriesRequest):
             "scans": result["scans"],
             "time_series": result["time_series"],
             "prediction": result["prediction"],
-            "warnings": result["warnings"]
+            "warnings": result["warnings"],
+            "regularization_per_scan": result["regularization_per_scan"]
         }
     except Exception as e:
         import traceback

@@ -50,6 +50,7 @@ def simulate_temporal_edema_progression(
     edema_volume = []
     global_avg_conductivity = []
     times_minutes = []
+    regularization_per_scan = []
 
     for scan_idx in range(num_scans):
         t_min = scan_idx * interval_seconds / 60.0
@@ -74,6 +75,7 @@ def simulate_temporal_edema_progression(
             })
 
         mf_result = run_multifrequency_simulation(grid_size, current_regions)
+        regularization_per_scan.append(mf_result.get("regularization", {}))
 
         fused = np.array(mf_result["fused_reconstruction"])
 
@@ -110,9 +112,11 @@ def simulate_temporal_edema_progression(
             "fused_reconstruction": mf_result["fused_reconstruction"],
             "edema_avg_conductivity": avg_edema_sigma,
             "edema_volume_pixels": int(edema_mask.sum()),
-            "global_avg_conductivity": global_avg
+            "global_avg_conductivity": global_avg,
+            "regularization": mf_result["regularization"]
         }
         scans.append(scan_data)
+        regularization_per_scan.append(mf_result["regularization"])
 
     x = np.array(times_minutes)
     y_sigma = np.array(edema_avg_conductivity)
@@ -186,5 +190,6 @@ def simulate_temporal_edema_progression(
             "predicted_30min_volume_pixels": predict_vol,
             "severity_level": severity
         },
-        "warnings": warning_messages
+        "warnings": warning_messages,
+        "regularization_per_scan": regularization_per_scan
     }
